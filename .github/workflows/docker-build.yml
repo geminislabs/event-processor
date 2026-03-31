@@ -51,8 +51,10 @@ jobs:
         with:
           shared-key: event-processor-rust
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libsasl2-dev libcurl4-openssl-dev
 
       - name: Check formatting
         run: cargo fmt --check
@@ -185,6 +187,8 @@ jobs:
           CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${{ vars.CIRCUIT_BREAKER_FAILURE_THRESHOLD }}
           CIRCUIT_BREAKER_RESET_TIMEOUT_MS: ${{ vars.CIRCUIT_BREAKER_RESET_TIMEOUT_MS }}
         run: |
+          HEALTH_PORT="${HEALTH_BIND_ADDR##*:}"
+
           cat > docker-compose.yml << EOF
           services:
             event-processor:
@@ -194,7 +198,13 @@ jobs:
               env_file:
                 - .env
               ports:
-                - "8080:8080"
+                - "${HEALTH_PORT}:${HEALTH_PORT}"
+              networks:
+                - siscom-network
+
+          networks:
+            siscom-network:
+              external: true
           EOF
 
           cat > .env << EOF
@@ -254,21 +264,23 @@ jobs:
             docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
 
             echo "Starting service"
-            $COMPOSE_CMD --env-file .env down || true
-            $COMPOSE_CMD --env-file .env up -d
+            \$COMPOSE_CMD --env-file .env down || true
+            \$COMPOSE_CMD --env-file .env up -d
+
+            HEALTH_PORT="\$(grep '^HEALTH_BIND_ADDR=' .env | cut -d= -f2 | awk -F: '{print \$NF}')"
 
             echo "Waiting for health endpoint"
             for i in 1 2 3 4 5; do
-              if curl -fsS --connect-timeout 5 --max-time 10 http://localhost:8080/health >/dev/null; then
+              if curl -fsS --connect-timeout 5 --max-time 10 "http://localhost:\${HEALTH_PORT}/health" >/dev/null; then
                 echo "Deployment successful"
                 exit 0
               fi
-              echo "Health check failed (attempt $i/5), retrying in 10s"
+              echo "Health check failed (attempt \$i/5), retrying in 10s"
               sleep 10
             done
 
             echo "Deployment failed: health endpoint did not respond"
-            $COMPOSE_CMD --env-file .env ps
-            $COMPOSE_CMD --env-file .env logs --tail=200 event-processor
+            \$COMPOSE_CMD --env-file .env ps
+            \$COMPOSE_CMD --env-file .env logs --tail=200 event-processor
             exit 1
           EOF

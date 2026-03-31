@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.82-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 
@@ -12,6 +12,8 @@ RUN apt-get update \
         cmake \
         perl \
         clang \
+        libcurl4-openssl-dev \
+        libsasl2-dev \
         protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
@@ -27,6 +29,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        libsasl2-2 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -35,8 +38,7 @@ COPY --from=builder /app/target/release/event-processor /app/event-processor
 EXPOSE 8080
 
 # HEALTH_BIND_ADDR format: host:port (e.g. 0.0.0.0:8080).
-# Extract port at runtime so this stays in sync with the env var.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS "http://localhost:${HEALTH_BIND_ADDR##*:}/health" || exit 1
+    CMD curl -fsS "http://${HEALTH_BIND_ADDR}/health" || exit 1
 
 ENTRYPOINT ["/app/event-processor"]

@@ -180,6 +180,10 @@ git tag v1.2.3
 
 # Publicar tag (dispara el workflow)
 git push origin v1.2.3
+
+# Eliminar tag
+git tag -d v1.0.0
+git push origin :refs/tags/v1.0.0
 ```
 
 El workflow realiza en orden:
