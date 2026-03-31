@@ -1,0 +1,222 @@
+name: Build and Deploy EVENT PROCESSOR to EC2
+
+permissions:
+  contents: read
+  packages: write
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate Dockerfile exists
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile not found at repository root"
+            echo "Create ./Dockerfile before running this workflow"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare image coordinates
+        id: image
+        run: |
+          echo "image_name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/event-processor" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: event-processor-rust
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features --locked
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image_name }}:${{ steps.image.outputs.image_tag }}
+            ${{ steps.image.outputs.image_name }}:latest
+          cache-from: type=gha,scope=event-processor-docker
+          cache-to: type=gha,mode=max,scope=event-processor-docker
+
+      - name: Smoke check pushed image metadata
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+        run: |
+          docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+          docker image inspect "${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null
+
+  deploy-to-ec2:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.EC2_SSH_KEY }}
+          name: id_rsa
+          known_hosts: unnecessary
+          if_key_exists: replace
+
+      - name: Prepare image coordinates
+        id: image
+        run: |
+          echo "image_name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/event-processor" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create deployment files
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+          DB_HOST: ${{ vars.DB_HOST }}
+          DB_PORT: ${{ vars.DB_PORT }}
+          DB_NAME: ${{ vars.DB_NAME }}
+          DB_USER: ${{ vars.DB_USER }}
+          DB_MAX_CONNECTIONS: ${{ vars.DB_MAX_CONNECTIONS }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          KAFKA_BROKERS: ${{ vars.KAFKA_BROKERS }}
+          KAFKA_TOPIC: ${{ vars.KAFKA_TOPIC }}
+          KAFKA_GROUP_ID: ${{ vars.KAFKA_GROUP_ID }}
+          KAFKA_SASL_MECHANISM: ${{ vars.KAFKA_SASL_MECHANISM }}
+          KAFKA_SECURITY_PROTOCOL: ${{ vars.KAFKA_SECURITY_PROTOCOL }}
+          KAFKA_ENABLE_AUTO_COMMIT: ${{ vars.KAFKA_ENABLE_AUTO_COMMIT }}
+          KAFKA_AUTO_OFFSET_RESET: ${{ vars.KAFKA_AUTO_OFFSET_RESET }}
+          KAFKA_USERNAME: ${{ vars.KAFKA_USERNAME }}
+          KAFKA_PASSWORD: ${{ secrets.KAFKA_PASSWORD }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+          HEALTH_BIND_ADDR: ${{ vars.HEALTH_BIND_ADDR }}
+          BATCH_SIZE: ${{ vars.BATCH_SIZE }}
+          BATCH_TIMEOUT_MS: ${{ vars.BATCH_TIMEOUT_MS }}
+          CIRCUIT_BREAKER_FAILURE_THRESHOLD: ${{ vars.CIRCUIT_BREAKER_FAILURE_THRESHOLD }}
+          CIRCUIT_BREAKER_RESET_TIMEOUT_MS: ${{ vars.CIRCUIT_BREAKER_RESET_TIMEOUT_MS }}
+        run: |
+          cat > docker-compose.yml << EOF
+          services:
+            event-processor:
+              image: ${IMAGE_NAME}:${IMAGE_TAG}
+              container_name: event-processor
+              restart: unless-stopped
+              env_file:
+                - .env
+              ports:
+                - "8080:8080"
+          EOF
+
+          cat > .env << EOF
+          DB_HOST=${DB_HOST}
+          DB_PORT=${DB_PORT}
+          DB_NAME=${DB_NAME}
+          DB_USER=${DB_USER}
+          DB_PASSWORD=${DB_PASSWORD}
+          DB_MAX_CONNECTIONS=${DB_MAX_CONNECTIONS}
+          KAFKA_BROKERS=${KAFKA_BROKERS}
+          KAFKA_TOPIC=${KAFKA_TOPIC}
+          KAFKA_GROUP_ID=${KAFKA_GROUP_ID}
+          KAFKA_SASL_MECHANISM=${KAFKA_SASL_MECHANISM}
+          KAFKA_USERNAME=${KAFKA_USERNAME}
+          KAFKA_PASSWORD=${KAFKA_PASSWORD}
+          KAFKA_SECURITY_PROTOCOL=${KAFKA_SECURITY_PROTOCOL}
+          KAFKA_ENABLE_AUTO_COMMIT=${KAFKA_ENABLE_AUTO_COMMIT}
+          KAFKA_AUTO_OFFSET_RESET=${KAFKA_AUTO_OFFSET_RESET}
+          LOG_LEVEL=${LOG_LEVEL}
+          HEALTH_BIND_ADDR=${HEALTH_BIND_ADDR}
+          BATCH_SIZE=${BATCH_SIZE}
+          BATCH_TIMEOUT_MS=${BATCH_TIMEOUT_MS}
+          CIRCUIT_BREAKER_FAILURE_THRESHOLD=${CIRCUIT_BREAKER_FAILURE_THRESHOLD}
+          CIRCUIT_BREAKER_RESET_TIMEOUT_MS=${CIRCUIT_BREAKER_RESET_TIMEOUT_MS}
+          EOF
+
+      - name: Copy files to EC2
+        run: |
+          chmod 600 ~/.ssh/id_rsa
+          ssh -o StrictHostKeyChecking=no -p "${{ secrets.EC2_PORT || '22' }}" "${{ secrets.EC2_USERNAME || 'ubuntu' }}@${{ secrets.EC2_HOST }}" "mkdir -p ~/event-processor"
+          scp -o StrictHostKeyChecking=no -P "${{ secrets.EC2_PORT || '22' }}" docker-compose.yml .env "${{ secrets.EC2_USERNAME || 'ubuntu' }}@${{ secrets.EC2_HOST }}:~/event-processor/"
+
+      - name: Deploy on EC2
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          IMAGE_TAG: ${{ steps.image.outputs.image_tag }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -p "${{ secrets.EC2_PORT || '22' }}" "${{ secrets.EC2_USERNAME || 'ubuntu' }}@${{ secrets.EC2_HOST }}" << EOF
+            set -e
+            cd ~/event-processor
+
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE_CMD="docker compose"
+            elif docker-compose version >/dev/null 2>&1; then
+              COMPOSE_CMD="docker-compose"
+            else
+              echo "Neither 'docker compose' nor 'docker-compose' is available"
+              exit 1
+            fi
+
+            echo "Logging in to GHCR"
+            echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+
+            echo "Pulling image ${IMAGE_NAME}:${IMAGE_TAG}"
+            docker pull "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            echo "Starting service"
+            $COMPOSE_CMD --env-file .env down || true
+            $COMPOSE_CMD --env-file .env up -d
+
+            echo "Waiting for health endpoint"
+            for i in 1 2 3 4 5; do
+              if curl -fsS --connect-timeout 5 --max-time 10 http://localhost:8080/health >/dev/null; then
+                echo "Deployment successful"
+                exit 0
+              fi
+              echo "Health check failed (attempt $i/5), retrying in 10s"
+              sleep 10
+            done
+
+            echo "Deployment failed: health endpoint did not respond"
+            $COMPOSE_CMD --env-file .env ps
+            $COMPOSE_CMD --env-file .env logs --tail=200 event-processor
+            exit 1
+          EOF
