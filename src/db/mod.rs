@@ -26,11 +26,12 @@ impl Database {
 
     pub async fn insert_events(&self, events: &[Event]) -> Result<PgQueryResult, sqlx::Error> {
         let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO events (source_type, source_id, source_message_id, unit_id, event_type_id, payload, occurred_at, source_epoch) ",
+            "INSERT INTO events (id, source_type, source_id, source_message_id, unit_id, event_type_id, payload, occurred_at, source_epoch) ",
         );
 
         query_builder.push_values(events, |mut row, event| {
-            row.push_bind(&event.source_type)
+            row.push_bind(event.id)
+                .push_bind(&event.source_type)
                 .push_bind(&event.source_id)
                 .push_bind(event.source_message_id)
                 .push_bind(event.unit_id)

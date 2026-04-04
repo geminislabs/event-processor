@@ -71,6 +71,7 @@ impl Evaluator for IgnitionEvaluator {
             };
 
             Some(vec![Event {
+                id: Uuid::new_v4(),
                 source_type: "device_message".to_string(),
                 source_id: msg.device_source_id(),
                 source_message_id: msg.message_id,

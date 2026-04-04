@@ -12,6 +12,7 @@ pub struct Event {
     pub schema_version: i32,
 
     pub event_type: String,
+    pub event_type_id: Uuid,
 
     pub source: Source,
 
@@ -57,6 +58,7 @@ impl Event {
             event_id,
             schema_version: 1,
             event_type: msg.msg_class.clone(),
+            event_type_id: Uuid::new_v4(),
             source: Source {
                 r#type: "device_message".to_string(),
                 id: source_id,

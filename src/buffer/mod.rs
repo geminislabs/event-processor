@@ -141,7 +141,8 @@ async fn flush_pending(
                         }
 
                         let kafka_event = KafkaEvent {
-                            event_id: Uuid::new_v4(),
+                            event_id: ev.id,
+                            event_type_id: ev.event_type_id,
                             schema_version: 1,
                             event_type,
                             source: KafkaSource {
