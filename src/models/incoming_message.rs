@@ -105,6 +105,10 @@ impl IncomingMessage {
             payload.insert("uuid".to_string(), Value::String(message_id.to_string()));
         }
 
+        if let Some(device_id) = &self.device_id {
+            payload.insert("device_id".to_string(), Value::String(device_id.clone()));
+        }
+
         if let Some(alert) = &self.alert {
             payload.insert("alert".to_string(), Value::String(alert.clone()));
         }
@@ -365,6 +369,7 @@ mod tests {
     fn payload_only_contains_allowed_fields() {
         let payload = r#"{
             "uuid":"bc6f8cef-38b5-5ee7-ba2a-9cfadff3d474",
+            "device_id":"0848086072",
             "alert":"Engine ON",
             "latitude":19.216813,
             "longitude":-102.575137,
@@ -382,6 +387,7 @@ mod tests {
         let object = payload.as_object().expect("payload should be an object");
 
         assert!(object.contains_key("uuid"));
+        assert!(object.contains_key("device_id"));
         assert!(object.contains_key("alert"));
         assert!(object.contains_key("latitude"));
         assert!(object.contains_key("longitude"));
@@ -392,6 +398,6 @@ mod tests {
         assert!(object.contains_key("main_battery_voltage"));
         assert!(object.contains_key("backup_batery_voltage"));
         assert!(!object.contains_key("other"));
-        assert_eq!(object.len(), 10);
+        assert_eq!(object.len(), 11);
     }
 }
