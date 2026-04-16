@@ -3,7 +3,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::config::PostgresConfig;
-use crate::models::EventTypeRegistry;
+use crate::models::{EventTypeRegistry, Geofence, GeofenceWithCells};
 
 pub struct Database {
     pool: PgPool,
@@ -79,5 +79,59 @@ impl Database {
             .await?;
 
         Ok(row.map(|r| r.get("unit_id")))
+    }
+
+    /// Carga todas las geofences activas junto con sus índices H3.
+    /// Optimizado para leer una sola vez y mantener en memoria.
+    pub async fn load_active_geofences(&self) -> Result<Vec<GeofenceWithCells>, sqlx::Error> {
+        // Primero cargamos todas las geofences activas
+        let geofences = sqlx::query(
+            r#"
+            SELECT id, organization_id, name, description, is_active, config, created_at, updated_at
+            FROM public.geofences
+            WHERE is_active = true
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut result = Vec::new();
+
+        // Para cada geofence, cargamos sus celdas H3
+        for geofence_row in geofences {
+            let geofence_id: Uuid = geofence_row.get("id");
+
+            let cells =
+                sqlx::query("SELECT h3_index FROM public.geofence_cells WHERE geofence_id = $1")
+                    .bind(geofence_id)
+                    .fetch_all(&self.pool)
+                    .await?;
+
+            let h3_indices: Vec<u64> = cells
+                .into_iter()
+                .map(|r| {
+                    let bigint: i64 = r.get("h3_index");
+                    bigint as u64
+                })
+                .collect();
+
+            let geofence = Geofence {
+                id: geofence_id,
+                organization_id: geofence_row.get("organization_id"),
+                name: geofence_row.get("name"),
+                description: geofence_row.get("description"),
+                is_active: geofence_row.get("is_active"),
+                config: geofence_row.get("config"),
+                created_at: geofence_row.get("created_at"),
+                updated_at: geofence_row.get("updated_at"),
+            };
+
+            result.push(GeofenceWithCells {
+                geofence,
+                h3_indices,
+            });
+        }
+
+        Ok(result)
     }
 }

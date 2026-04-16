@@ -184,6 +184,19 @@ impl IncomingMessage {
 
         Value::Object(payload)
     }
+
+    pub fn payload_with_geofence(&self, geofence_id: Uuid) -> Value {
+        let mut payload = self.payload();
+
+        if let Value::Object(ref mut map) = payload {
+            map.insert(
+                "geofence_id".to_string(),
+                Value::String(geofence_id.to_string()),
+            );
+        }
+
+        payload
+    }
 }
 
 fn datetime_from_unix(raw: i64) -> Option<DateTime<Utc>> {

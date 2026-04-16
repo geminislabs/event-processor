@@ -25,7 +25,7 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db::Database;
 use crate::dispatcher::{spawn_evaluation_pipeline, Dispatcher};
-use crate::evaluators::{EvaluatorContext, GeofenceEvaluator, IgnitionEvaluator};
+use crate::evaluators::{EvaluatorContext, GeofenceEvaluator, GeofenceStore, IgnitionEvaluator};
 use crate::health::{serve_health, HealthTracker};
 use crate::kafka::run_consumer;
 use crate::models::{CompletionStatus, PersistRequest, ProcessEnvelope};
@@ -40,6 +40,13 @@ async fn main() -> Result<()> {
 
     let event_types = db.load_event_types().await?;
     tracing::info!(count = event_types.len(), "event_types registry loaded");
+
+    // Cargamos los geofences activos en memoria
+    let geofences = db.load_active_geofences().await?;
+    tracing::info!(count = geofences.len(), "active geofences loaded");
+
+    let geofence_store = GeofenceStore::new();
+    geofence_store.load(geofences);
 
     // invert registry for id -> code lookup used when producing events to Kafka
     let event_type_lookup = Arc::new(
@@ -86,7 +93,10 @@ async fn main() -> Result<()> {
         Dispatcher::builder()
             .with_context(evaluator_context)
             .register_for_class("ALERT", Arc::new(IgnitionEvaluator::new(&event_types)?))
-            .register_global(Arc::new(GeofenceEvaluator::new(&event_types)))
+            .register_global(Arc::new(GeofenceEvaluator::new(
+                &event_types,
+                geofence_store,
+            )))
             .build(),
     );
 
