@@ -319,13 +319,30 @@ H3 es un sistema de indexación hexagonal jerárquico de Uber. Características:
 
 ### Preparación para actualizaciones en caliente
 
-Los métodos `upsert()` y `remove()` están listos para ser invocados por un futuro **consumer de Kafka** que escuche cambios en la tabla `geofences`:
+El servicio ya consume `KAFKA_GEOFENCES_UPDATE_TOPIC` para aplicar cambios en caliente sobre `GeofenceStore` sin reinicio.
+
+Contrato soportado:
+
+- `event_type`: `UPSERT` o `DELETE`
+- `entity`: debe ser `geofence`
+- `UPSERT`: requiere `data.cells` (snapshot completo)
+- `DELETE`: requiere `data.id`
+- `config`: se conserva como JSONB (`serde_json::Value`) sin transformaciones
+- `timestamp` y `data.updated_at`: formato UTC con sufijo `Z`
+
+Comportamiento:
+
+- `UPSERT` con `is_active=true`: `geofence_store.upsert(...)`
+- `UPSERT` con `is_active=false`: se elimina del store en memoria
+- `DELETE`: `geofence_store.remove(geofence_id)`
+
+Esto permite cambios de cobertura geográfica en tiempo real mientras el consumidor principal sigue evaluando mensajes.
+
+Ejemplo lógico de flujo:
 
 - Un mensaje llega: `{ action: "upsert", geofence_id, h3_indices, ... }`
 - El consumer llama `geofence_store.upsert(new_geofence_with_cells)`
 - Sin downtime, sin bloqueos en evaluación
-
-Implementación de ese consumer: será un módulo separado que actualiza el `GeofenceStore` en tiempo de ejecución.
 
 ## Carga inicial de datos (BD)
 
@@ -346,7 +363,7 @@ Las variables principales están en `.env`.
 
 ### Kafka (consumo y producción)
 
-- `KAFKA_BROKERS`, `KAFKA_TOPIC`, `KAFKA_GROUP_ID`, `KAFKA_PRODUCER_TOPIC` (por defecto `unit-events`), credenciales SASL si aplica.
+- `KAFKA_BROKERS`, `KAFKA_TOPIC`, `KAFKA_GEOFENCES_UPDATE_TOPIC`, `KAFKA_GROUP_ID`, `KAFKA_PRODUCER_TOPIC` (por defecto `unit-events`), credenciales SASL si aplica.
 
 ### Aplicación
 

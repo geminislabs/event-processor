@@ -26,6 +26,7 @@ pub struct PostgresConfig {
 pub struct KafkaConfig {
     pub brokers: String,
     pub topic: String,
+    pub geofences_update_topic: String,
     pub group_id: String,
     pub sasl_mechanism: Option<String>,
     pub username: Option<String>,
@@ -77,6 +78,7 @@ impl AppConfig {
             kafka: KafkaConfig {
                 brokers: required_var("KAFKA_BROKERS")?,
                 topic: required_var("KAFKA_TOPIC")?,
+                geofences_update_topic: required_var("KAFKA_GEOFENCES_UPDATE_TOPIC")?,
                 group_id: required_var("KAFKA_GROUP_ID")?,
                 sasl_mechanism: optional_var("KAFKA_SASL_MECHANISM"),
                 username: optional_var("KAFKA_USERNAME"),

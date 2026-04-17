@@ -143,12 +143,6 @@ async fn process_one(
     let device_id = envelope.token.device_id.as_deref().unwrap_or("unknown");
 
     if outcome.events.is_empty() {
-        info!(
-            device_id,
-            evaluators = ?outcome.evaluators,
-            processing_time_ms = elapsed_ms,
-            "message processed without events"
-        );
         let _ = completion_tx
             .send(CompletionStatus {
                 token: envelope.token,

@@ -1,5 +1,6 @@
 mod event;
 mod geofence;
+mod geofence_update;
 mod incoming_message;
 
 use std::collections::HashMap;
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 pub use event::Event;
 pub use geofence::{Geofence, GeofenceWithCells};
+pub use geofence_update::{GeofenceStoreUpdate, GeofenceUpdateMessage};
 pub use incoming_message::IncomingMessage;
 
 /// Loaded once at startup from `SELECT id, code FROM event_types`.

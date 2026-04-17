@@ -27,7 +27,7 @@ use crate::db::Database;
 use crate::dispatcher::{spawn_evaluation_pipeline, Dispatcher};
 use crate::evaluators::{EvaluatorContext, GeofenceEvaluator, GeofenceStore, IgnitionEvaluator};
 use crate::health::{serve_health, HealthTracker};
-use crate::kafka::run_consumer;
+use crate::kafka::{run_consumer, run_geofence_updates_consumer};
 use crate::models::{CompletionStatus, PersistRequest, ProcessEnvelope};
 use crate::unit_devices::UnitDeviceResolver;
 
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
             .register_for_class("ALERT", Arc::new(IgnitionEvaluator::new(&event_types)?))
             .register_global(Arc::new(GeofenceEvaluator::new(
                 &event_types,
-                geofence_store,
+                geofence_store.clone(),
             )))
             .build(),
     );
@@ -130,12 +130,20 @@ async fn main() -> Result<()> {
         completion_rx,
         shutdown.clone(),
     ));
+    let mut geofence_updates_handle = tokio::spawn(run_geofence_updates_consumer(
+        config.kafka.clone(),
+        geofence_store.clone(),
+        kafka_breaker.clone(),
+        health.clone(),
+        shutdown.clone(),
+    ));
 
     tokio::signal::ctrl_c().await?;
     info!("shutdown signal received");
     shutdown.cancel();
 
     await_result_task_shutdown("kafka consumer", &mut consumer_handle).await?;
+    await_result_task_shutdown("geofence updates consumer", &mut geofence_updates_handle).await?;
     drop(completion_tx);
     await_unit_task_shutdown("evaluation pipeline", &mut pipeline_handle).await?;
     await_unit_task_shutdown("buffer writer", &mut writer_handle).await?;

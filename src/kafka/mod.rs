@@ -12,8 +12,12 @@ use tracing::{error, info, warn};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::KafkaConfig;
+use crate::evaluators::GeofenceStore;
 use crate::health::HealthTracker;
-use crate::models::{CommitToken, CompletionStatus, IncomingMessage, ProcessEnvelope};
+use crate::models::{
+    CommitToken, CompletionStatus, GeofenceStoreUpdate, GeofenceUpdateMessage, IncomingMessage,
+    ProcessEnvelope,
+};
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct TopicPartition {
@@ -96,7 +100,12 @@ pub async fn run_consumer(
     mut completion_rx: mpsc::Receiver<CompletionStatus>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let consumer = build_consumer(&config)?;
+    let consumer = build_consumer(
+        &config,
+        &config.group_id,
+        &config.auto_offset_reset,
+        "event-processor-consumer",
+    )?;
     consumer.subscribe(&[&config.topic])?;
     tracing::info!(brokers = %config.brokers, topic = %config.topic, group_id = %config.group_id, "kafka consumer started");
 
@@ -171,15 +180,83 @@ pub async fn run_consumer(
     Ok(())
 }
 
-fn build_consumer(config: &KafkaConfig) -> Result<StreamConsumer> {
+pub async fn run_geofence_updates_consumer(
+    config: KafkaConfig,
+    store: GeofenceStore,
+    breaker: std::sync::Arc<CircuitBreaker>,
+    health: std::sync::Arc<HealthTracker>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let geofence_group_id = config.group_id.clone();
+    let consumer = build_consumer(
+        &config,
+        &geofence_group_id,
+        "earliest",
+        "event-processor-geofence-updates-consumer",
+    )?;
+
+    consumer.subscribe(&[&config.geofences_update_topic])?;
+    info!(
+        brokers = %config.brokers,
+        topic = %config.geofences_update_topic,
+        group_id = %geofence_group_id,
+        "geofence updates consumer started"
+    );
+
+    loop {
+        if !breaker.allow_request() {
+            health.mark_kafka_error();
+
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("geofence updates consumer stopping after shutdown signal");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+
+            continue;
+        }
+
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("geofence updates consumer stopping after shutdown signal");
+                break;
+            }
+            message = consumer.recv() => {
+                match message {
+                    Ok(message) => {
+                        breaker.record_success();
+                        health.mark_kafka_ok();
+                        handle_geofence_update_message(message, &store);
+                    }
+                    Err(error) => {
+                        breaker.record_failure();
+                        health.mark_kafka_error();
+                        error!(error = %error, "geofence updates kafka receive failed");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn build_consumer(
+    config: &KafkaConfig,
+    group_id: &str,
+    auto_offset_reset: &str,
+    client_id: &str,
+) -> Result<StreamConsumer> {
     let mut client = ClientConfig::new();
-    // Distinguish consumer client in broker logs and librdkafka messages
-    client.set("client.id", "event-processor-consumer");
+    // Distinguish consumers in broker logs and librdkafka messages.
+    client.set("client.id", client_id);
     client
         .set("bootstrap.servers", &config.brokers)
-        .set("group.id", &config.group_id)
+        .set("group.id", group_id)
         .set("enable.auto.commit", "false")
-        .set("auto.offset.reset", &config.auto_offset_reset)
+        .set("auto.offset.reset", auto_offset_reset)
         .set("enable.partition.eof", "false")
         .set("socket.keepalive.enable", "true")
         .set("session.timeout.ms", "6000");
@@ -202,6 +279,106 @@ fn build_consumer(config: &KafkaConfig) -> Result<StreamConsumer> {
     }
 
     client.create().context("failed to create kafka consumer")
+}
+
+fn handle_geofence_update_message(
+    message: rdkafka::message::BorrowedMessage<'_>,
+    store: &GeofenceStore,
+) {
+    let payload = match message.payload_view::<str>() {
+        Some(Ok(payload)) => payload,
+        Some(Err(error)) => {
+            warn!(
+                error = %error,
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "received invalid UTF-8 geofence update payload"
+            );
+            return;
+        }
+        None => {
+            warn!(
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "received empty geofence update payload"
+            );
+            return;
+        }
+    };
+
+    let update_message = match serde_json::from_str::<GeofenceUpdateMessage>(payload) {
+        Ok(message) => message,
+        Err(error) => {
+            warn!(
+                error = %error,
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "malformed geofence update message skipped"
+            );
+            return;
+        }
+    };
+
+    let event_id = update_message.event_id;
+    let event_timestamp = update_message.timestamp;
+    let Some(update) = update_message.into_store_update() else {
+        warn!(
+            topic = message.topic(),
+            partition = message.partition(),
+            offset = message.offset(),
+            event_id = %event_id,
+            "geofence update message ignored due to unsupported event contract"
+        );
+        return;
+    };
+
+    match update {
+        GeofenceStoreUpdate::Upsert(geofence_with_cells) => {
+            let geofence_id = geofence_with_cells.geofence.id;
+            let is_active = geofence_with_cells.geofence.is_active;
+            let cell_count = geofence_with_cells.h3_indices.len();
+
+            if !is_active {
+                store.remove(geofence_id);
+                info!(
+                    topic = message.topic(),
+                    partition = message.partition(),
+                    offset = message.offset(),
+                    event_id = %event_id,
+                    event_timestamp = %event_timestamp,
+                    geofence_id = %geofence_id,
+                    "geofence upsert marked inactive; removed from in-memory store"
+                );
+            } else {
+                store.upsert(geofence_with_cells);
+                info!(
+                    topic = message.topic(),
+                    partition = message.partition(),
+                    offset = message.offset(),
+                    event_id = %event_id,
+                    event_timestamp = %event_timestamp,
+                    geofence_id = %geofence_id,
+                    cell_count,
+                    "geofence upsert applied to in-memory store"
+                );
+            }
+        }
+        GeofenceStoreUpdate::Delete { geofence_id } => {
+            store.remove(geofence_id);
+            info!(
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                event_id = %event_id,
+                event_timestamp = %event_timestamp,
+                geofence_id = %geofence_id,
+                "geofence delete applied to in-memory store"
+            );
+        }
+    }
 }
 
 async fn handle_message(
