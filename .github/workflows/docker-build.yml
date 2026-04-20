@@ -28,6 +28,16 @@ jobs:
             exit 1
           fi
 
+      - name: Validate startup logo assets exist
+        run: |
+          set -euo pipefail
+          for file in assets/geminis-labs-logo.txt assets/geminis-labs-logo_plain.txt; do
+            if [ ! -f "$file" ]; then
+              echo "Missing required startup asset: $file"
+              exit 1
+            fi
+          done
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

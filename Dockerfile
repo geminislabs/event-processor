@@ -22,6 +22,7 @@ RUN cargo install cargo-chef --locked
 FROM base AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
+COPY assets ./assets
 COPY src ./src
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -31,6 +32,7 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
+COPY assets ./assets
 COPY src ./src
 
 RUN cargo build --release --locked
