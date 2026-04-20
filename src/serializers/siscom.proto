@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package siscom.v1;
+
+/* =========================
+ * ENUMS
+ * ========================= */
+
+enum Vendor {
+  VENDOR_UNKNOWN = 0;
+  SUNTECH = 1;
+  QUECLINK = 2;
+}
+
+enum MessageClass {
+  MSG_UNKNOWN = 0;
+  STATUS = 1;
+  EVENT = 2;
+  ALERT = 3;
+}
+
+/* =========================
+ * METADATA
+ * ========================= */
+
+message Metadata {
+  uint32 worker_id = 1;
+  uint64 received_epoch = 2;
+  uint64 decoded_epoch = 3;
+  uint32 bytes = 4;
+  string client_ip = 5;
+  uint32 client_port = 6;
+}
+
+/* =========================
+ * NORMALIZED DATA
+ * ========================= */
+
+message NormalizedData {
+  string device_id = 1;
+
+  double latitude = 2;
+  double longitude = 3;
+  double speed = 4;
+  double course = 5;
+
+  bool engine_on = 6;
+  uint32 satellites = 7;
+
+  MessageClass msg_class = 8;
+
+  uint64 gps_epoch = 9;
+
+  double main_battery_voltage = 10;
+  double backup_battery_voltage = 11;
+
+  uint64 odometer_mts = 12;
+  uint64 trip_distance_mts = 13;
+  
+  // Additional fields that may be present in the normalized data
+  map<string, string> additional_fields = 14;
+}
+
+/* =========================
+ * DECODED MESSAGE (ONEOF)
+ * ========================= */
+
+message SuntechDecoded {
+  // Suntech-specific decoded fields
+  map<string, string> fields = 1;
+}
+
+message QueclinkDecoded {
+  // Queclink-specific decoded fields
+  map<string, string> fields = 1;
+}
+
+/* =========================
+ * KAFKA CONTRACT MESSAGE
+ * ========================= */
+
+message KafkaMessage {
+  string uuid = 1;
+
+  // Decoded message as oneof per vendor
+  oneof decoded {
+    SuntechDecoded suntech = 2;
+    QueclinkDecoded queclink = 3;
+  }
+
+  // Normalized/homogenized data
+  map<string, string> data = 4;
+
+  // Message metadata
+  Metadata metadata = 5;
+
+  // Raw payload (original message)
+  string raw = 6;
+}
+
+/* =========================
+ * LEGACY MESSAGE (BACKWARD COMPATIBILITY)
+ * ========================= */
+
+message Communication {
+  string uuid = 1;
+
+  Vendor vendor = 2;
+
+  NormalizedData data = 3;
+  Metadata metadata = 4;
+
+  // Decoded payload as bytes with content type
+  // This allows flexibility: today it's JSON, tomorrow it could be
+  // vendor-specific protobuf or other binary formats
+  bytes decoded_payload = 20;
+  string decoded_content_type = 21;
+
+  // Raw payload (original message or hex representation)
+  string raw = 22;
+}

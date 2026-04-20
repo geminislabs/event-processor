@@ -444,3 +444,9 @@ Si quieres, puedo:
 - añadir scripts SQL/CSV para poblar `event_types` y `unit_devices`,
 - generar un pequeño `README.seed.md` con instrucciones de carga,
 - o crear un comando/ejemplo `cargo run --example seed_db` que haga la carga inicial.
+
+## TODO técnico
+
+- Implementar contador/métrica de errores de deserialización del consumer Kafka (`kafka_consumer_deserialize_errors_total`) para observabilidad operativa.
+- Incluir etiquetas mínimas: `topic`, `partition`, `format` (`protobuf`/`json`), `stage` (`decode`/`mapping`/`utf8`/`json_parse`) y `reason`.
+- Exponer resumen en `/health` y preparar integración futura con stack de métricas (Prometheus/OpenTelemetry).

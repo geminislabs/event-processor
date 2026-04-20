@@ -18,6 +18,7 @@ use crate::models::{
     CommitToken, CompletionStatus, GeofenceStoreUpdate, GeofenceUpdateMessage, IncomingMessage,
     ProcessEnvelope,
 };
+use crate::serializers::protobuf;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct TopicPartition {
@@ -165,7 +166,16 @@ pub async fn run_consumer(
                     Ok(message) => {
                         breaker.record_success();
                         health.mark_kafka_ok();
-                        handle_message(message, &process_tx, &mut partition_states, &consumer, &breaker, &health).await;
+                        handle_message(
+                            message,
+                            &config.topic,
+                            &process_tx,
+                            &mut partition_states,
+                            &consumer,
+                            &breaker,
+                            &health,
+                        )
+                        .await;
                     }
                     Err(error) => {
                         breaker.record_failure();
@@ -383,6 +393,7 @@ fn handle_geofence_update_message(
 
 async fn handle_message(
     message: rdkafka::message::BorrowedMessage<'_>,
+    protobuf_topic: &str,
     process_tx: &mpsc::Sender<ProcessEnvelope>,
     partition_states: &mut HashMap<TopicPartition, PartitionState>,
     consumer: &StreamConsumer,
@@ -406,23 +417,8 @@ async fn handle_message(
         device_id: None,
     };
 
-    let payload = match message.payload_view::<str>() {
-        Some(Ok(payload)) => payload,
-        Some(Err(error)) => {
-            warn!(error = %error, topic = message.topic(), partition = message.partition(), offset, "received invalid UTF-8 payload");
-            mark_and_commit(
-                consumer,
-                partition_states,
-                CompletionStatus {
-                    token,
-                    success: true,
-                },
-                breaker,
-                health,
-            )
-            .await;
-            return;
-        }
+    let payload = match message.payload() {
+        Some(payload) => payload,
         None => {
             warn!(
                 topic = message.topic(),
@@ -445,7 +441,17 @@ async fn handle_message(
         }
     };
 
-    match serde_json::from_str::<IncomingMessage>(payload) {
+    let parsed_result = if message.topic() == protobuf_topic {
+        protobuf::deserialize_incoming_message(payload)
+    } else {
+        match std::str::from_utf8(payload) {
+            Ok(payload) => serde_json::from_str::<IncomingMessage>(payload)
+                .map_err(|error| anyhow::anyhow!("failed to parse JSON payload: {error}")),
+            Err(error) => Err(anyhow::anyhow!("received invalid UTF-8 payload: {error}")),
+        }
+    };
+
+    match parsed_result {
         Ok(parsed) => {
             let token = CommitToken {
                 device_id: parsed.device_id.clone(),
@@ -486,13 +492,19 @@ async fn handle_message(
             }
         }
         Err(error) => {
-            warn!(error = %error, topic = message.topic(), partition = message.partition(), offset, "malformed message skipped");
+            warn!(
+                error = %error,
+                topic = message.topic(),
+                partition = message.partition(),
+                offset,
+                "message parsing failed"
+            );
             mark_and_commit(
                 consumer,
                 partition_states,
                 CompletionStatus {
                     token,
-                    success: true,
+                    success: false,
                 },
                 breaker,
                 health,

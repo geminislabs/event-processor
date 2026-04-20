@@ -8,6 +8,7 @@ mod health;
 mod kafka;
 mod models;
 mod processors;
+mod serializers;
 mod unit_devices;
 
 use std::sync::Arc;
