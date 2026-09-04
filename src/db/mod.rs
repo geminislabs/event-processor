@@ -53,9 +53,16 @@ impl Database {
     pub async fn load_unit_devices(
         &self,
     ) -> Result<std::collections::HashMap<String, Uuid>, sqlx::Error> {
-        let rows = sqlx::query("SELECT unit_id, device_id FROM unit_devices")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT DISTINCT ON (device_id) device_id, unit_id
+            FROM unit_devices
+            WHERE unassigned_at IS NULL
+            ORDER BY device_id, assigned_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
 
         let registry = rows
             .into_iter()
@@ -73,10 +80,19 @@ impl Database {
         &self,
         device_id: &str,
     ) -> Result<Option<Uuid>, sqlx::Error> {
-        let row = sqlx::query("SELECT unit_id, device_id FROM unit_devices WHERE device_id = $1")
-            .bind(device_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            r#"
+            SELECT unit_id
+            FROM unit_devices
+            WHERE device_id = $1
+              AND unassigned_at IS NULL
+            ORDER BY assigned_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| r.get("unit_id")))
     }

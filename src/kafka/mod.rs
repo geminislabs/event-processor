@@ -16,9 +16,10 @@ use crate::evaluators::GeofenceStore;
 use crate::health::HealthTracker;
 use crate::models::{
     CommitToken, CompletionStatus, GeofenceStoreUpdate, GeofenceUpdateMessage, IncomingMessage,
-    ProcessEnvelope,
+    ProcessEnvelope, UnitDeviceStoreUpdate, UnitDeviceUpdateMessage,
 };
 use crate::serializers::protobuf;
+use crate::unit_devices::UnitDeviceResolver;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct TopicPartition {
@@ -265,6 +266,81 @@ pub async fn run_geofence_updates_consumer(
     Ok(())
 }
 
+pub async fn run_unit_device_updates_consumer(
+    config: KafkaConfig,
+    resolver: std::sync::Arc<UnitDeviceResolver>,
+    breaker: std::sync::Arc<CircuitBreaker>,
+    health: std::sync::Arc<HealthTracker>,
+    shutdown: CancellationToken,
+) -> Result<()> {
+    let group_id = format!("{}-unit-devices-updates", config.group_id);
+    let consumer = build_consumer(
+        &config,
+        &group_id,
+        "earliest",
+        "event-processor-unit-devices-updates-consumer",
+    )?;
+
+    consumer.subscribe(&[&config.unit_devices_update_topic])?;
+    info!(
+        brokers = %config.brokers,
+        topic = %config.unit_devices_update_topic,
+        group_id = %group_id,
+        "unit device updates consumer started"
+    );
+
+    loop {
+        if !breaker.allow_request() {
+            health.mark_kafka_error();
+
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("unit device updates consumer stopping after shutdown signal");
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+
+            continue;
+        }
+
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("unit device updates consumer stopping after shutdown signal");
+                break;
+            }
+            message = consumer.recv() => {
+                match message {
+                    Ok(message) => {
+                        breaker.record_success();
+                        health.mark_kafka_ok();
+                        handle_unit_device_update_message(&message, &resolver).await;
+
+                        if let Err(error) = consumer.commit_message(&message, CommitMode::Sync) {
+                            breaker.record_failure();
+                            health.mark_kafka_error();
+                            error!(
+                                error = %error,
+                                topic = message.topic(),
+                                partition = message.partition(),
+                                offset = message.offset(),
+                                "failed to commit unit device update offset"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        breaker.record_failure();
+                        health.mark_kafka_error();
+                        error!(error = %error, "unit device updates kafka receive failed");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn build_consumer(
     config: &KafkaConfig,
     group_id: &str,
@@ -398,6 +474,101 @@ fn handle_geofence_update_message(
                 event_timestamp = %event_timestamp,
                 geofence_id = %geofence_id,
                 "geofence delete applied to in-memory store"
+            );
+        }
+    }
+}
+
+async fn handle_unit_device_update_message(
+    message: &rdkafka::message::BorrowedMessage<'_>,
+    resolver: &UnitDeviceResolver,
+) {
+    let payload = match message.payload_view::<str>() {
+        Some(Ok(payload)) => payload,
+        Some(Err(error)) => {
+            warn!(
+                error = %error,
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "received invalid UTF-8 unit device update payload"
+            );
+            return;
+        }
+        None => {
+            warn!(
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "received empty unit device update payload"
+            );
+            return;
+        }
+    };
+
+    let update_message = match serde_json::from_str::<UnitDeviceUpdateMessage>(payload) {
+        Ok(message) => message,
+        Err(error) => {
+            warn!(
+                error = %error,
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                "malformed unit device update message skipped"
+            );
+            return;
+        }
+    };
+
+    let event_id = update_message.event_id;
+    let event_timestamp = update_message.timestamp;
+    let organization_id = update_message.organization_id;
+    let previous_unit_id = update_message.data.previous_unit_id;
+    let previous_organization_id = update_message.data.previous_organization_id;
+    let Some(update) = update_message.into_store_update() else {
+        warn!(
+            topic = message.topic(),
+            partition = message.partition(),
+            offset = message.offset(),
+            event_id = %event_id,
+            "unit device update message ignored due to unsupported event contract"
+        );
+        return;
+    };
+
+    match update {
+        UnitDeviceStoreUpdate::Assign {
+            device_id,
+            unit_id,
+        } => {
+            resolver.apply(&device_id, Some(unit_id)).await;
+            info!(
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                event_id = %event_id,
+                event_timestamp = %event_timestamp,
+                organization_id = ?organization_id,
+                previous_unit_id = ?previous_unit_id,
+                previous_organization_id = ?previous_organization_id,
+                device_id = %device_id,
+                unit_id = %unit_id,
+                "unit device assignment applied to in-memory cache"
+            );
+        }
+        UnitDeviceStoreUpdate::Unassign { device_id } => {
+            resolver.apply(&device_id, None).await;
+            info!(
+                topic = message.topic(),
+                partition = message.partition(),
+                offset = message.offset(),
+                event_id = %event_id,
+                event_timestamp = %event_timestamp,
+                organization_id = ?organization_id,
+                previous_unit_id = ?previous_unit_id,
+                previous_organization_id = ?previous_organization_id,
+                device_id = %device_id,
+                "unit device unassignment applied to in-memory cache"
             );
         }
     }

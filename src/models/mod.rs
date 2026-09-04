@@ -2,6 +2,7 @@ mod event;
 mod geofence;
 mod geofence_update;
 mod incoming_message;
+mod unit_device_update;
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -12,6 +13,7 @@ pub use event::Event;
 pub use geofence::{Geofence, GeofenceWithCells};
 pub use geofence_update::{GeofenceStoreUpdate, GeofenceUpdateMessage};
 pub use incoming_message::IncomingMessage;
+pub use unit_device_update::{UnitDeviceStoreUpdate, UnitDeviceUpdateMessage};
 
 /// Loaded once at startup from `SELECT id, code FROM event_types`.
 pub type EventTypeRegistry = HashMap<String, Uuid>;

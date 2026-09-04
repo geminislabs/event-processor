@@ -27,6 +27,7 @@ pub struct KafkaConfig {
     pub brokers: String,
     pub topic: String,
     pub geofences_update_topic: String,
+    pub unit_devices_update_topic: String,
     pub group_id: String,
     pub sasl_mechanism: Option<String>,
     pub username: Option<String>,
@@ -79,6 +80,10 @@ impl AppConfig {
                 brokers: required_var("KAFKA_BROKERS")?,
                 topic: required_var("KAFKA_TOPIC")?,
                 geofences_update_topic: required_var("KAFKA_GEOFENCES_UPDATE_TOPIC")?,
+                unit_devices_update_topic: var_with_default(
+                    "KAFKA_UNIT_DEVICES_UPDATES_TOPIC",
+                    "unit-devices-updates",
+                ),
                 group_id: required_var("KAFKA_GROUP_ID")?,
                 sasl_mechanism: optional_var("KAFKA_SASL_MECHANISM"),
                 username: optional_var("KAFKA_USERNAME"),
