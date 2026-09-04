@@ -33,13 +33,8 @@ pub struct UnitDeviceUpdateData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnitDeviceStoreUpdate {
-    Assign {
-        device_id: String,
-        unit_id: Uuid,
-    },
-    Unassign {
-        device_id: String,
-    },
+    Assign { device_id: String, unit_id: Uuid },
+    Unassign { device_id: String },
 }
 
 impl UnitDeviceUpdateMessage {
@@ -62,12 +57,10 @@ impl UnitDeviceUpdateMessage {
             UnitDeviceUpdateEventType::Upsert if !is_active || self.data.unit_id.is_none() => {
                 Some(UnitDeviceStoreUpdate::Unassign { device_id })
             }
-            UnitDeviceUpdateEventType::Upsert => self.data.unit_id.map(|unit_id| {
-                UnitDeviceStoreUpdate::Assign {
-                    device_id,
-                    unit_id,
-                }
-            }),
+            UnitDeviceUpdateEventType::Upsert => self
+                .data
+                .unit_id
+                .map(|unit_id| UnitDeviceStoreUpdate::Assign { device_id, unit_id }),
         }
     }
 }

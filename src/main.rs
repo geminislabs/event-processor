@@ -31,9 +31,7 @@ use crate::evaluators::{
     EvaluatorContext, GeofenceEvaluator, GeofenceStateTracker, GeofenceStore, IgnitionEvaluator,
 };
 use crate::health::{serve_health, HealthTracker};
-use crate::kafka::{
-    run_consumer, run_geofence_updates_consumer, run_unit_device_updates_consumer,
-};
+use crate::kafka::{run_consumer, run_geofence_updates_consumer, run_unit_device_updates_consumer};
 use crate::models::{CompletionStatus, PersistRequest, ProcessEnvelope};
 use crate::unit_devices::UnitDeviceResolver;
 
@@ -166,8 +164,11 @@ async fn main() -> Result<()> {
 
     await_result_task_shutdown("kafka consumer", &mut consumer_handle).await?;
     await_result_task_shutdown("geofence updates consumer", &mut geofence_updates_handle).await?;
-    await_result_task_shutdown("unit device updates consumer", &mut unit_device_updates_handle)
-        .await?;
+    await_result_task_shutdown(
+        "unit device updates consumer",
+        &mut unit_device_updates_handle,
+    )
+    .await?;
     drop(completion_tx);
     await_unit_task_shutdown("evaluation pipeline", &mut pipeline_handle).await?;
     await_unit_task_shutdown("buffer writer", &mut writer_handle).await?;

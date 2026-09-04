@@ -537,10 +537,7 @@ async fn handle_unit_device_update_message(
     };
 
     match update {
-        UnitDeviceStoreUpdate::Assign {
-            device_id,
-            unit_id,
-        } => {
+        UnitDeviceStoreUpdate::Assign { device_id, unit_id } => {
             resolver.apply(&device_id, Some(unit_id)).await;
             info!(
                 topic = message.topic(),
