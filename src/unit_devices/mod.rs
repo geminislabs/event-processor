@@ -30,14 +30,23 @@ impl UnitDeviceResolver {
         let fetched = self.db.find_unit_id_by_device(device_id).await?;
 
         if let Some(unit_id) = fetched {
-            self.cache
-                .write()
-                .await
-                .insert(device_id.to_string(), unit_id);
+            self.apply(device_id, Some(unit_id)).await;
             return Ok(Some(unit_id));
         }
 
         Ok(None)
+    }
+
+    pub async fn apply(&self, device_id: &str, unit_id: Option<Uuid>) {
+        let mut cache = self.cache.write().await;
+        match unit_id {
+            Some(unit_id) => {
+                cache.insert(device_id.to_string(), unit_id);
+            }
+            None => {
+                cache.remove(device_id);
+            }
+        }
     }
 
     pub async fn len(&self) -> usize {

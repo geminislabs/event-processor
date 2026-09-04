@@ -31,7 +31,9 @@ use crate::evaluators::{
     EvaluatorContext, GeofenceEvaluator, GeofenceStateTracker, GeofenceStore, IgnitionEvaluator,
 };
 use crate::health::{serve_health, HealthTracker};
-use crate::kafka::{run_consumer, run_geofence_updates_consumer};
+use crate::kafka::{
+    run_consumer, run_geofence_updates_consumer, run_unit_device_updates_consumer,
+};
 use crate::models::{CompletionStatus, PersistRequest, ProcessEnvelope};
 use crate::unit_devices::UnitDeviceResolver;
 
@@ -73,7 +75,7 @@ async fn main() -> Result<()> {
         count = unit_devices.len().await,
         "unit_devices registry loaded"
     );
-    let evaluator_context = Arc::new(EvaluatorContext::new(unit_devices));
+    let evaluator_context = Arc::new(EvaluatorContext::new(unit_devices.clone()));
 
     let db_breaker = Arc::new(CircuitBreaker::new(
         "postgres",
@@ -150,6 +152,13 @@ async fn main() -> Result<()> {
         health.clone(),
         shutdown.clone(),
     ));
+    let mut unit_device_updates_handle = tokio::spawn(run_unit_device_updates_consumer(
+        config.kafka.clone(),
+        Arc::clone(&unit_devices),
+        Arc::clone(&kafka_breaker),
+        Arc::clone(&health),
+        shutdown.clone(),
+    ));
 
     tokio::signal::ctrl_c().await?;
     info!("shutdown signal received");
@@ -157,6 +166,8 @@ async fn main() -> Result<()> {
 
     await_result_task_shutdown("kafka consumer", &mut consumer_handle).await?;
     await_result_task_shutdown("geofence updates consumer", &mut geofence_updates_handle).await?;
+    await_result_task_shutdown("unit device updates consumer", &mut unit_device_updates_handle)
+        .await?;
     drop(completion_tx);
     await_unit_task_shutdown("evaluation pipeline", &mut pipeline_handle).await?;
     await_unit_task_shutdown("buffer writer", &mut writer_handle).await?;
