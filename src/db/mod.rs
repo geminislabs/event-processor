@@ -50,6 +50,12 @@ impl Database {
         Ok(registry)
     }
 
+    /// Mapa `device_id` -> `unit_id` con la asignación vigente de cada
+    /// dispositivo.
+    ///
+    /// `assigned_at` es nullable y en `DESC` Postgres ordena los NULL primero,
+    /// así que sin `NULLS LAST` una fila sin fecha le ganaría a la asignación
+    /// fechada más reciente.
     pub async fn load_unit_devices(
         &self,
     ) -> Result<std::collections::HashMap<String, Uuid>, sqlx::Error> {
@@ -58,7 +64,7 @@ impl Database {
             SELECT DISTINCT ON (device_id) device_id, unit_id
             FROM unit_devices
             WHERE unassigned_at IS NULL
-            ORDER BY device_id, assigned_at DESC
+            ORDER BY device_id, assigned_at DESC NULLS LAST
             "#,
         )
         .fetch_all(&self.pool)
@@ -76,6 +82,10 @@ impl Database {
         Ok(registry)
     }
 
+    /// Resuelve la unidad de un dispositivo que no estaba en el cache.
+    ///
+    /// Mismo criterio que `load_unit_devices`: entre las asignaciones vigentes
+    /// gana la de `assigned_at` más reciente, con los NULL al final.
     pub async fn find_unit_id_by_device(
         &self,
         device_id: &str,
@@ -86,7 +96,7 @@ impl Database {
             FROM unit_devices
             WHERE device_id = $1
               AND unassigned_at IS NULL
-            ORDER BY assigned_at DESC
+            ORDER BY assigned_at DESC NULLS LAST
             LIMIT 1
             "#,
         )
