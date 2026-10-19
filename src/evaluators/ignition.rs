@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use futures::future::BoxFuture;
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::evaluators::{Evaluator, EvaluatorContext};
@@ -62,13 +61,7 @@ impl Evaluator for IgnitionEvaluator {
             };
 
             let device_id = msg.device_id.as_deref()?;
-            let unit_id = match context.unit_devices().resolve_by_device_id(device_id).await {
-                Ok(value) => value,
-                Err(error) => {
-                    warn!(device_id, error = %error, "failed to resolve unit_id for device_id");
-                    None
-                }
-            };
+            let unit_id = context.unit_devices().resolve_by_device_id(device_id).await;
 
             Some(vec![Event {
                 id: Uuid::new_v4(),

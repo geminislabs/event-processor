@@ -1,4 +1,12 @@
-use chrono::{DateTime, Utc};
+//! Eventos `unit_device` de `control-plane-events`.
+//!
+//! El contrato vive en siscom-admin-api (`docs/architecture/eventos-de-control.md`,
+//! ADR-008). El topic lleva varias entidades; este servicio solo aplica
+//! `unit_device` y descarta el resto sin quejarse.
+//!
+//! Cada evento trae el estado completo: `UPSERT` con la unidad de la asignación
+//! vigente, o `DELETE` cuando el equipo dejó de tener una.
+
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -9,26 +17,22 @@ pub enum UnitDeviceUpdateEventType {
     Delete,
 }
 
+/// El sobre común de `control-plane-events`. `data` se interpreta según `entity`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UnitDeviceUpdateMessage {
     pub event_id: Uuid,
     pub event_type: UnitDeviceUpdateEventType,
     pub entity: String,
-    pub timestamp: DateTime<Utc>,
-    pub organization_id: Option<Uuid>,
-    pub data: UnitDeviceUpdateData,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct UnitDeviceUpdateData {
-    pub device_id: String,
-    pub unit_id: Option<Uuid>,
+struct UnitDeviceData {
+    device_id: String,
     #[serde(default)]
-    pub previous_unit_id: Option<Uuid>,
-    #[serde(default)]
-    pub previous_organization_id: Option<Uuid>,
-    #[serde(default)]
-    pub is_active: Option<bool>,
+    unit_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,30 +41,33 @@ pub enum UnitDeviceStoreUpdate {
     Unassign { device_id: String },
 }
 
+/// Versión de `unit_device` que este servicio entiende.
+const SCHEMA_VERSION: u32 = 1;
+
 impl UnitDeviceUpdateMessage {
+    /// `None` si el evento no es de `unit_device`, es de una versión que no
+    /// se conoce o le falta lo necesario.
     pub fn into_store_update(self) -> Option<UnitDeviceStoreUpdate> {
         if !self.entity.eq_ignore_ascii_case("unit_device") {
             return None;
         }
+        if self.schema_version.is_some_and(|v| v != SCHEMA_VERSION) {
+            return None;
+        }
 
-        let device_id = self.data.device_id.trim().to_string();
+        let data: UnitDeviceData = serde_json::from_value(self.data).ok()?;
+        let device_id = data.device_id.trim().to_string();
         if device_id.is_empty() {
             return None;
         }
 
-        let is_active = self.data.is_active.unwrap_or(true);
-
-        match self.event_type {
-            UnitDeviceUpdateEventType::Delete => {
+        match (self.event_type, data.unit_id) {
+            (UnitDeviceUpdateEventType::Upsert, Some(unit_id)) => {
+                Some(UnitDeviceStoreUpdate::Assign { device_id, unit_id })
+            }
+            (UnitDeviceUpdateEventType::Upsert, None) | (UnitDeviceUpdateEventType::Delete, _) => {
                 Some(UnitDeviceStoreUpdate::Unassign { device_id })
             }
-            UnitDeviceUpdateEventType::Upsert if !is_active || self.data.unit_id.is_none() => {
-                Some(UnitDeviceStoreUpdate::Unassign { device_id })
-            }
-            UnitDeviceUpdateEventType::Upsert => self
-                .data
-                .unit_id
-                .map(|unit_id| UnitDeviceStoreUpdate::Assign { device_id, unit_id }),
         }
     }
 }
@@ -69,22 +76,26 @@ impl UnitDeviceUpdateMessage {
 mod tests {
     use super::*;
 
+    fn mensaje(value: serde_json::Value) -> UnitDeviceUpdateMessage {
+        serde_json::from_value(value).expect("valid payload")
+    }
+
     #[test]
-    fn upsert_active_assigns_unit() {
+    fn upsert_assigns_unit() {
         let unit_id = Uuid::new_v4();
-        let message: UnitDeviceUpdateMessage = serde_json::from_value(serde_json::json!({
+        let message = mensaje(serde_json::json!({
+            "schema_version": 1,
             "event_id": Uuid::new_v4(),
             "event_type": "UPSERT",
             "entity": "unit_device",
-            "timestamp": "2026-09-02T00:00:00Z",
+            "timestamp": "2026-10-19T00:00:00Z",
             "organization_id": Uuid::new_v4(),
             "data": {
                 "device_id": "0848072989",
                 "unit_id": unit_id,
-                "is_active": true
+                "organization_id": Uuid::new_v4()
             }
-        }))
-        .expect("valid payload");
+        }));
 
         assert_eq!(
             message.into_store_update(),
@@ -96,40 +107,19 @@ mod tests {
     }
 
     #[test]
-    fn upsert_inactive_or_delete_unassigns() {
-        let inactive: UnitDeviceUpdateMessage = serde_json::from_value(serde_json::json!({
-            "event_id": Uuid::new_v4(),
-            "event_type": "UPSERT",
-            "entity": "unit_device",
-            "timestamp": "2026-09-02T00:00:00Z",
-            "organization_id": null,
-            "data": {
-                "device_id": "0848072989",
-                "unit_id": null,
-                "is_active": false
-            }
-        }))
-        .expect("valid payload");
-
-        assert_eq!(
-            inactive.into_store_update(),
-            Some(UnitDeviceStoreUpdate::Unassign {
-                device_id: "0848072989".to_string(),
-            })
-        );
-
-        let delete: UnitDeviceUpdateMessage = serde_json::from_value(serde_json::json!({
+    fn delete_carries_only_the_key_and_unassigns() {
+        let message = mensaje(serde_json::json!({
+            "schema_version": 1,
             "event_id": Uuid::new_v4(),
             "event_type": "DELETE",
             "entity": "unit_device",
-            "timestamp": "2026-09-02T00:00:00Z",
+            "timestamp": "2026-10-19T00:00:00Z",
             "organization_id": null,
             "data": { "device_id": "0848072989" }
-        }))
-        .expect("valid payload");
+        }));
 
         assert_eq!(
-            delete.into_store_update(),
+            message.into_store_update(),
             Some(UnitDeviceStoreUpdate::Unassign {
                 device_id: "0848072989".to_string(),
             })
@@ -137,20 +127,37 @@ mod tests {
     }
 
     #[test]
-    fn ignores_unknown_entity() {
-        let message: UnitDeviceUpdateMessage = serde_json::from_value(serde_json::json!({
+    fn other_entities_of_the_topic_are_ignored() {
+        // Un `organization_user` no tiene `device_id`: no debe ni intentar leerlo.
+        let message = mensaje(serde_json::json!({
+            "schema_version": 1,
             "event_id": Uuid::new_v4(),
             "event_type": "UPSERT",
-            "entity": "geofence",
-            "timestamp": "2026-09-02T00:00:00Z",
+            "entity": "organization_user",
+            "timestamp": "2026-10-19T00:00:00Z",
             "organization_id": Uuid::new_v4(),
             "data": {
-                "device_id": "0848072989",
-                "unit_id": Uuid::new_v4(),
-                "is_active": true
+                "organization_id": Uuid::new_v4(),
+                "user_id": Uuid::new_v4(),
+                "role": "member",
+                "status": "ACTIVE"
             }
-        }))
-        .expect("valid payload");
+        }));
+
+        assert_eq!(message.into_store_update(), None);
+    }
+
+    #[test]
+    fn unknown_schema_version_is_ignored() {
+        let message = mensaje(serde_json::json!({
+            "schema_version": 2,
+            "event_id": Uuid::new_v4(),
+            "event_type": "UPSERT",
+            "entity": "unit_device",
+            "timestamp": "2026-10-19T00:00:00Z",
+            "organization_id": null,
+            "data": { "device_id": "0848072989", "unit_id": Uuid::new_v4() }
+        }));
 
         assert_eq!(message.into_store_update(), None);
     }

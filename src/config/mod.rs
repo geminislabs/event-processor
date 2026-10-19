@@ -27,7 +27,11 @@ pub struct KafkaConfig {
     pub brokers: String,
     pub topic: String,
     pub geofences_update_topic: String,
-    pub unit_devices_update_topic: String,
+    /// Grupo propio del consumidor de geocercas, distinto de `group_id`.
+    pub geofences_group_id: String,
+    /// `control-plane-events` de siscom-admin-api (ADR-008). Se lee sin grupo:
+    /// cada arranque parte de la foto de `control_plane.*`.
+    pub control_plane_topic: String,
     pub group_id: String,
     pub sasl_mechanism: Option<String>,
     pub username: Option<String>,
@@ -80,9 +84,13 @@ impl AppConfig {
                 brokers: required_var("KAFKA_BROKERS")?,
                 topic: required_var("KAFKA_TOPIC")?,
                 geofences_update_topic: required_var("KAFKA_GEOFENCES_UPDATE_TOPIC")?,
-                unit_devices_update_topic: var_with_default(
-                    "KAFKA_UNIT_DEVICES_UPDATES_TOPIC",
-                    "unit-devices-updates",
+                geofences_group_id: var_with_default(
+                    "KAFKA_GEOFENCES_GROUP_ID",
+                    "events-processor-geofences",
+                ),
+                control_plane_topic: var_with_default(
+                    "KAFKA_CONTROL_PLANE_TOPIC",
+                    "control-plane-events",
                 ),
                 group_id: required_var("KAFKA_GROUP_ID")?,
                 sasl_mechanism: optional_var("KAFKA_SASL_MECHANISM"),
