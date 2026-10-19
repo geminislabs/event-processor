@@ -4,7 +4,6 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use h3o::{LatLng, Resolution};
-use tracing::warn;
 use uuid::Uuid;
 
 use crate::evaluators::{Evaluator, EvaluatorContext};
@@ -163,17 +162,7 @@ impl Evaluator for GeofenceEvaluator {
             let resolved_unit_id = if let Some(unit_id) = msg.unit_id {
                 Some(unit_id)
             } else if let Some(device_id) = msg.device_id.as_deref() {
-                match context.unit_devices().resolve_by_device_id(device_id).await {
-                    Ok(unit_id) => unit_id,
-                    Err(error) => {
-                        warn!(
-                            device_id,
-                            error = %error,
-                            "failed to resolve unit_id for device_id in geofence evaluator"
-                        );
-                        None
-                    }
-                }
+                context.unit_devices().resolve_by_device_id(device_id).await
             } else {
                 None
             };

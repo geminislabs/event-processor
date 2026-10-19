@@ -31,7 +31,10 @@ use crate::evaluators::{
     EvaluatorContext, GeofenceEvaluator, GeofenceStateTracker, GeofenceStore, IgnitionEvaluator,
 };
 use crate::health::{serve_health, HealthTracker};
-use crate::kafka::{run_consumer, run_geofence_updates_consumer, run_unit_device_updates_consumer};
+use crate::kafka::{
+    prepare_control_plane_consumer, run_consumer, run_control_plane_consumer,
+    run_geofence_updates_consumer,
+};
 use crate::models::{CompletionStatus, PersistRequest, ProcessEnvelope};
 use crate::unit_devices::UnitDeviceResolver;
 
@@ -68,6 +71,9 @@ async fn main() -> Result<()> {
             .collect::<std::collections::HashMap<uuid::Uuid, String>>(),
     );
 
+    // Los offsets de partida se anotan antes de la foto (ADR-008 §4). Si el
+    // topic no se puede leer, el proceso no arranca (§9).
+    let control_plane_start = prepare_control_plane_consumer(&config.kafka)?;
     let unit_devices = Arc::new(UnitDeviceResolver::load(db.clone()).await?);
     tracing::info!(
         count = unit_devices.len().await,
@@ -150,10 +156,9 @@ async fn main() -> Result<()> {
         health.clone(),
         shutdown.clone(),
     ));
-    let mut unit_device_updates_handle = tokio::spawn(run_unit_device_updates_consumer(
-        config.kafka.clone(),
+    let mut control_plane_handle = tokio::spawn(run_control_plane_consumer(
+        control_plane_start,
         Arc::clone(&unit_devices),
-        Arc::clone(&kafka_breaker),
         Arc::clone(&health),
         shutdown.clone(),
     ));
@@ -164,11 +169,7 @@ async fn main() -> Result<()> {
 
     await_result_task_shutdown("kafka consumer", &mut consumer_handle).await?;
     await_result_task_shutdown("geofence updates consumer", &mut geofence_updates_handle).await?;
-    await_result_task_shutdown(
-        "unit device updates consumer",
-        &mut unit_device_updates_handle,
-    )
-    .await?;
+    await_result_task_shutdown("control plane consumer", &mut control_plane_handle).await?;
     drop(completion_tx);
     await_unit_task_shutdown("evaluation pipeline", &mut pipeline_handle).await?;
     await_unit_task_shutdown("buffer writer", &mut writer_handle).await?;

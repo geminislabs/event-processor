@@ -4,7 +4,7 @@ Servicio Rust que consume mensajes de Kafka, los enruta a través de evaluadores
 
 ## Resumen del cambio
 
-Este servicio ya no persiste eventos en la tabla `events` de PostgreSQL. El flujo actual: los mensajes entrantes se evalúan y, si producen eventos, se emiten a Kafka. La base de datos se usa únicamente en tiempo de arranque para cargar datos iniciales (catalogo `event_types` y `unit_devices`) y para consultas de resolución que los evaluadores puedan necesitar.
+Este servicio ya no persiste eventos en la tabla `events` de PostgreSQL. El flujo actual: los mensajes entrantes se evalúan y, si producen eventos, se emiten a Kafka. La base de datos se usa únicamente en tiempo de arranque para cargar datos iniciales: el catálogo `event_types`, las geocercas activas y la foto de asignaciones de `control_plane.unit_devices`. Después, las asignaciones se mantienen al día con los eventos de `control-plane-events` (ver `docs/eventos-de-control.md`).
 
 ## Objetivo
 

@@ -198,7 +198,10 @@ pub async fn run_geofence_updates_consumer(
     health: std::sync::Arc<HealthTracker>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let geofence_group_id = config.group_id.clone();
+    // Grupo propio: compartir `group_id` con el consumidor de mensajes GPS,
+    // suscritos a topics distintos, hacía que cada uno disparara rebalanceos
+    // del otro.
+    let geofence_group_id = config.geofences_group_id.clone();
     let consumer = build_consumer(
         &config,
         &geofence_group_id,
@@ -266,72 +269,147 @@ pub async fn run_geofence_updates_consumer(
     Ok(())
 }
 
-pub async fn run_unit_device_updates_consumer(
-    config: KafkaConfig,
+/// Dónde empieza a leer el consumidor de `control-plane-events`: el final de
+/// cada partición, anotado **antes** de cargar la foto (ADR-008 §4).
+///
+/// Lo que se publique entre esta anotación y la foto se aplica dos veces —ya
+/// estaba en la foto—, lo cual no hace daño porque cada evento trae el estado
+/// completo. Lo que no puede pasar es lo contrario: un evento posterior a la
+/// foto que nunca se lee.
+pub struct ControlPlaneStart {
+    consumer: StreamConsumer,
+    topic: String,
+    offsets: Vec<(i32, i64)>,
+}
+
+/// Prepara el consumidor de control y anota los offsets de partida.
+///
+/// Falla si no puede leer el topic —no existe, o falta la ACL—, y el proceso
+/// no arranca (ADR-008 §9). El consumidor de `unit-devices-updates` que había
+/// antes registraba `TopicAuthorizationFailed` cada cinco minutos durante
+/// semanas con el contenedor en `healthy`.
+pub fn prepare_control_plane_consumer(config: &KafkaConfig) -> Result<ControlPlaneStart> {
+    // Sin commits ni suscripción: el grupo solo existe porque librdkafka lo
+    // pide para crear un consumidor; nunca se registra en el coordinador.
+    let consumer = build_consumer(
+        config,
+        &format!("{}-control-plane", config.group_id),
+        "latest",
+        "event-processor-control-plane-consumer",
+    )?;
+
+    let timeout = Duration::from_secs(10);
+    let metadata = consumer
+        .fetch_metadata(Some(&config.control_plane_topic), timeout)
+        .with_context(|| {
+            format!(
+                "cannot read metadata of {}; does the topic exist and does this user have READ?",
+                config.control_plane_topic
+            )
+        })?;
+    let partitions: Vec<i32> = metadata
+        .topics()
+        .iter()
+        .filter(|topic| topic.name() == config.control_plane_topic)
+        .flat_map(|topic| {
+            if let Some(error) = topic.error() {
+                tracing::error!(error = ?error, topic = topic.name(), "control plane topic metadata error");
+            }
+            topic.partitions().iter().map(|p| p.id()).collect::<Vec<_>>()
+        })
+        .collect();
+    if partitions.is_empty() {
+        anyhow::bail!(
+            "{} has no readable partitions; does the topic exist and does this user have READ?",
+            config.control_plane_topic
+        );
+    }
+
+    let mut offsets = Vec::with_capacity(partitions.len());
+    for partition in partitions {
+        let (_, high) = consumer
+            .fetch_watermarks(&config.control_plane_topic, partition, timeout)
+            .with_context(|| {
+                format!(
+                    "cannot read watermarks of {}[{partition}]",
+                    config.control_plane_topic
+                )
+            })?;
+        offsets.push((partition, high));
+    }
+
+    Ok(ControlPlaneStart {
+        consumer,
+        topic: config.control_plane_topic.clone(),
+        offsets,
+    })
+}
+
+/// Cada cuánto se pregunta al broker por el final del topic de control.
+const CONTROL_PLANE_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Aplica los eventos `unit_device` de `control-plane-events` al resolver.
+///
+/// No comparte el circuit breaker de Kafka con el consumidor de mensajes GPS:
+/// un fallo aquí no debe pausar el procesamiento, y antes los errores del
+/// consumidor de asignaciones contaban en el mismo breaker. Su estado va al
+/// health check, que responde 503 si deja de poder leer.
+///
+/// Un topic de control puede pasar horas sin mensajes, así que «recibí algo»
+/// no sirve para saber si se recuperó de una caída. Cada
+/// `CONTROL_PLANE_PROBE_INTERVAL` se lee el final de cada partición —una
+/// consulta al broker, no a la base—: si responde, el consumidor está sano, y
+/// la diferencia con lo aplicado es su atraso.
+pub async fn run_control_plane_consumer(
+    start: ControlPlaneStart,
     resolver: std::sync::Arc<UnitDeviceResolver>,
-    breaker: std::sync::Arc<CircuitBreaker>,
     health: std::sync::Arc<HealthTracker>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let group_id = format!("{}-unit-devices-updates", config.group_id);
-    let consumer = build_consumer(
-        &config,
-        &group_id,
-        "earliest",
-        "event-processor-unit-devices-updates-consumer",
-    )?;
+    let ControlPlaneStart {
+        consumer,
+        topic,
+        offsets,
+    } = start;
 
-    consumer.subscribe(&[&config.unit_devices_update_topic])?;
-    info!(
-        brokers = %config.brokers,
-        topic = %config.unit_devices_update_topic,
-        group_id = %group_id,
-        "unit device updates consumer started"
-    );
+    let mut assignment = TopicPartitionList::new();
+    for (partition, offset) in &offsets {
+        assignment.add_partition_offset(&topic, *partition, Offset::Offset(*offset))?;
+    }
+    consumer.assign(&assignment)?;
+    // Siguiente offset por leer de cada partición.
+    let mut next: HashMap<i32, i64> = offsets.iter().copied().collect();
+    health.mark_control_plane_ok(Some(0));
+    info!(topic = %topic, offsets = ?offsets, "control plane consumer started");
+
+    let mut probe = tokio::time::interval(CONTROL_PLANE_PROBE_INTERVAL);
+    probe.tick().await;
 
     loop {
-        if !breaker.allow_request() {
-            health.mark_kafka_error();
-
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    info!("unit device updates consumer stopping after shutdown signal");
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
-            }
-
-            continue;
-        }
-
         tokio::select! {
             _ = shutdown.cancelled() => {
-                info!("unit device updates consumer stopping after shutdown signal");
+                info!("control plane consumer stopping after shutdown signal");
                 break;
+            }
+            _ = probe.tick() => {
+                match control_plane_lag(&consumer, &topic, &next) {
+                    Ok(lag) => health.mark_control_plane_ok(Some(lag)),
+                    Err(error) => {
+                        health.mark_control_plane_error();
+                        warn!(error = %error, topic = %topic, "control plane probe failed");
+                    }
+                }
             }
             message = consumer.recv() => {
                 match message {
                     Ok(message) => {
-                        breaker.record_success();
-                        health.mark_kafka_ok();
                         handle_unit_device_update_message(&message, &resolver).await;
-
-                        if let Err(error) = consumer.commit_message(&message, CommitMode::Sync) {
-                            breaker.record_failure();
-                            health.mark_kafka_error();
-                            error!(
-                                error = %error,
-                                topic = message.topic(),
-                                partition = message.partition(),
-                                offset = message.offset(),
-                                "failed to commit unit device update offset"
-                            );
-                        }
+                        next.insert(message.partition(), message.offset() + 1);
+                        health.mark_control_plane_applied(message.offset());
                     }
                     Err(error) => {
-                        breaker.record_failure();
-                        health.mark_kafka_error();
-                        error!(error = %error, "unit device updates kafka receive failed");
+                        health.mark_control_plane_error();
+                        error!(error = %error, topic = %topic, "control plane kafka receive failed");
                     }
                 }
             }
@@ -339,6 +417,23 @@ pub async fn run_unit_device_updates_consumer(
     }
 
     Ok(())
+}
+
+/// Mensajes publicados que este consumidor aún no aplicó, sumando particiones.
+fn control_plane_lag(
+    consumer: &StreamConsumer,
+    topic: &str,
+    next: &HashMap<i32, i64>,
+) -> Result<i64> {
+    let mut lag = 0;
+    for (partition, next_offset) in next {
+        // Llamada bloqueante de librdkafka; corta, y el runtime es multihilo.
+        let (_, high) = tokio::task::block_in_place(|| {
+            consumer.fetch_watermarks(topic, *partition, Duration::from_secs(5))
+        })?;
+        lag += (high - next_offset).max(0);
+    }
+    Ok(lag)
 }
 
 fn build_consumer(
@@ -483,27 +578,14 @@ async fn handle_unit_device_update_message(
     message: &rdkafka::message::BorrowedMessage<'_>,
     resolver: &UnitDeviceResolver,
 ) {
-    let payload = match message.payload_view::<str>() {
-        Some(Ok(payload)) => payload,
-        Some(Err(error)) => {
-            warn!(
-                error = %error,
-                topic = message.topic(),
-                partition = message.partition(),
-                offset = message.offset(),
-                "received invalid UTF-8 unit device update payload"
-            );
-            return;
-        }
-        None => {
-            warn!(
-                topic = message.topic(),
-                partition = message.partition(),
-                offset = message.offset(),
-                "received empty unit device update payload"
-            );
-            return;
-        }
+    let Some(Ok(payload)) = message.payload_view::<str>() else {
+        warn!(
+            topic = message.topic(),
+            partition = message.partition(),
+            offset = message.offset(),
+            "control plane message without a UTF-8 payload skipped"
+        );
+        return;
     };
 
     let update_message = match serde_json::from_str::<UnitDeviceUpdateMessage>(payload) {
@@ -514,25 +596,15 @@ async fn handle_unit_device_update_message(
                 topic = message.topic(),
                 partition = message.partition(),
                 offset = message.offset(),
-                "malformed unit device update message skipped"
+                "malformed control plane message skipped"
             );
             return;
         }
     };
 
     let event_id = update_message.event_id;
-    let event_timestamp = update_message.timestamp;
-    let organization_id = update_message.organization_id;
-    let previous_unit_id = update_message.data.previous_unit_id;
-    let previous_organization_id = update_message.data.previous_organization_id;
+    // Las demás entidades del topic no le importan a este servicio.
     let Some(update) = update_message.into_store_update() else {
-        warn!(
-            topic = message.topic(),
-            partition = message.partition(),
-            offset = message.offset(),
-            event_id = %event_id,
-            "unit device update message ignored due to unsupported event contract"
-        );
         return;
     };
 
@@ -540,14 +612,8 @@ async fn handle_unit_device_update_message(
         UnitDeviceStoreUpdate::Assign { device_id, unit_id } => {
             resolver.apply(&device_id, Some(unit_id)).await;
             info!(
-                topic = message.topic(),
-                partition = message.partition(),
                 offset = message.offset(),
                 event_id = %event_id,
-                event_timestamp = %event_timestamp,
-                organization_id = ?organization_id,
-                previous_unit_id = ?previous_unit_id,
-                previous_organization_id = ?previous_organization_id,
                 device_id = %device_id,
                 unit_id = %unit_id,
                 "unit device assignment applied to in-memory cache"
@@ -556,14 +622,8 @@ async fn handle_unit_device_update_message(
         UnitDeviceStoreUpdate::Unassign { device_id } => {
             resolver.apply(&device_id, None).await;
             info!(
-                topic = message.topic(),
-                partition = message.partition(),
                 offset = message.offset(),
                 event_id = %event_id,
-                event_timestamp = %event_timestamp,
-                organization_id = ?organization_id,
-                previous_unit_id = ?previous_unit_id,
-                previous_organization_id = ?previous_organization_id,
                 device_id = %device_id,
                 "unit device unassignment applied to in-memory cache"
             );
